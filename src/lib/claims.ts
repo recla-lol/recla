@@ -295,18 +295,13 @@ export async function readEscrowGeneric(source: `0x${string}`, account: `0x${str
   };
 }
 
-/** Link to the simulator with everything it needs in the query string. */
+/**
+ * Link to the simulator. Only the call itself travels in the URL (target, claimer, calldata, token address); the
+ * simulator treats all of it as untrusted input: it decodes the call, re-reads every amount and symbol from chain and
+ * offers signing only through the gate in src/lib/gate.ts.
+ */
 export function simulateHref(row: ClaimRow, from: string): string {
   if (!row.action) return "/simulate";
-  const q = new URLSearchParams({
-    from,
-    to: row.action.to,
-    data: row.action.data,
-    label: `${row.sourceName}: ${row.action.label}`,
-    amount: row.amount.toString(),
-    symbol: row.token.symbol,
-    decimals: String(row.token.decimals),
-    ...(row.token.address ? { token: row.token.address } : {}),
-  });
+  const q = new URLSearchParams({ from, to: row.action.to, data: row.action.data, ...(row.token.address ? { token: row.token.address } : {}) });
   return `/simulate?${q.toString()}`;
 }

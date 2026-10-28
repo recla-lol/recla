@@ -1,15 +1,20 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { encodeFunctionData, getAddress, type Abi, type Hex } from "viem";
 import { CHAIN, explorerAddress, explorerTx, shortAddress } from "@/config/brand";
+import { registryLive } from "@/config/contracts";
 import { ArrowUpRight } from "@/components/site/Icons";
 import { useWalletModal } from "@/components/wallet/WalletButton";
 import { useWallet } from "@/components/wallet/WalletProvider";
 import { ESCROW_ABI, LOCKER_ABI, REFUND_ABI, VESTING_ABI } from "@/lib/abi";
 import { ETH, formatUnits, tokenInfo, type TokenInfo } from "@/lib/claims";
 import { explain, waitForReceipt } from "@/lib/client";
+import { describeCall, isBuiltInSource, selectorVerdict, signGate } from "@/lib/gate";
+import { read } from "@/lib/client";
+import { REGISTRY_ABI } from "@/lib/abi";
+import { CONTRACTS } from "@/config/contracts";
 import { balanceNow, calldataProblem, returnedAmount, simulate, type SimResult } from "@/lib/simulate";
 
 const isAddr = (v: string) => /^0x[0-9a-fA-F]{40}$/.test(v);
@@ -40,21 +45,14 @@ export function Simulator() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [sent, setSent] = useState<{ hash: string; ok: boolean | null; after: bigint | null } | null>(null);
-
-  const expected = useMemo(() => {
-    const a = q.get("amount");
-    return a && /^[0-9]+$/.test(a) ? BigInt(a) : null;
-  }, [q]);
-  const label = q.get("label");
+  // Whether the target is in the source registry (read on chain; false while the registry is not deployed).
+  const [registered, setRegistered] = useState(false);
+  const [ran, setRan] = useState<{ to: string; data: Hex } | null>(null);
 
   useEffect(() => {
+    // Only a token ADDRESS is taken from a link; its symbol and decimals are read from the token contract.
     const t = q.get("token");
-    if (t && isAddr(t)) {
-      void tokenInfo(t).then(setToken);
-    } else if (q.get("symbol") && q.get("symbol") !== "ETH") {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- from the shared link
-      setToken({ address: null, symbol: q.get("symbol") ?? "tokens", decimals: Number(q.get("decimals") ?? 18) });
-    }
+    if (t && isAddr(t)) void tokenInfo(t).then(setToken);
   }, [q]);
 
   const p = PRESETS.find((x) => x.key === preset) ?? PRESETS[0];
@@ -94,9 +92,18 @@ export function Simulator() {
     setBusy(true);
     try {
       const f = getAddress(who);
-      const [r, b] = await Promise.all([simulate({ from: f, to: getAddress(to.trim()), data }), balanceNow(f, token)]);
+      const target = getAddress(to.trim());
+      const [r, b, reg] = await Promise.all([
+        simulate({ from: f, to: target, data }),
+        balanceNow(f, token),
+        isBuiltInSource(target) || !registryLive()
+          ? Promise.resolve(false)
+          : read<bigint>({ to: CONTRACTS.registry, abi: REGISTRY_ABI as Abi, fn: "entryCountForSource", args: [target] }).then((n) => n > 0n).catch(() => false),
+      ]);
       setRes(r);
       setBefore(b);
+      setRegistered(reg);
+      setRan({ to: target, data });
     } catch (e) {
       setErr(e instanceof Error ? e.message : "The simulation failed.");
     } finally {
@@ -111,15 +118,21 @@ export function Simulator() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const got = res?.ok ? (returnedAmount(res.returned) ?? expected) : null;
+  const got = res?.ok ? returnedAmount(res.returned) : null;
   const mine = address && isAddr(who) && address.toLowerCase() === who.toLowerCase();
+  // The gate is decided on exactly the call that was simulated.
+  const gate = ran ? signGate(ran.data, ran.to, registered) : null;
+  const decoded = ran ? describeCall(ran.data) : null;
+  const verdict = ran ? selectorVerdict(ran.data) : null;
 
   async function sign() {
-    const data = calldata();
-    if (!data || !res?.ok) return;
+    if (!ran || !res?.ok) return;
+    // Checked again at the moment of signing: nothing outside the gate ever reaches the wallet.
+    const g = signGate(ran.data, ran.to, registered);
+    if (!g.ok) return setErr(g.reason);
     setErr(null);
     try {
-      const hash = await sendTransaction({ to: getAddress(to.trim()), data });
+      const hash = await sendTransaction({ to: ran.to, data: ran.data });
       setSent({ hash, ok: null, after: null });
       const r = await waitForReceipt(hash, 180_000);
       const after = await balanceNow(getAddress(who), token);
@@ -132,10 +145,10 @@ export function Simulator() {
   return (
     <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_420px]">
       <div className="rc-card p-6" data-testid="simulator">
-        {label ? (
-          <p className="rc-mono m-0 mb-5 text-lime" style={{ fontSize: 10 }}>
-            Prepared by the claim check: {label}
-          </p>
+        {fromLink ? (
+          <div className="rc-alert mb-5" data-testid="sim-link-warning">
+            This call came from a link. {CHAIN.name} contracts are real, but this page did not build the call: read the decoded call under the result before anything else. Signing is offered only for the claim calls Recla builds, on a built-in or registered source.
+          </div>
         ) : null}
         <div className="grid gap-4">
           <label className="rc-field">
@@ -198,6 +211,14 @@ export function Simulator() {
                   <dd className="m-0 text-ink">{before === null || got === null ? "—" : `${formatUnits(before + got, token.decimals)} ${token.symbol}`}</dd>
                 </div>
               </dl>
+              <div className="mt-5 border-t border-line pt-4" data-testid="sim-decoded">
+                <span className="rc-label" style={{ fontSize: 10 }}>
+                  Decoded call
+                </span>
+                <p className="m-0 mt-1 font-mono text-[12px] break-all text-ink">{decoded ?? `unknown call, selector ${verdict?.selector ?? "—"}`}</p>
+                <p className="m-0 mt-1 font-mono text-[11px] break-all text-muted">to {ran?.to}</p>
+                {verdict?.kind === "blocked" ? <p className="rc-err mt-2 text-[13px]">{verdict.reason}</p> : null}
+              </div>
               <p className="rc-note mt-4">
                 Block {res.blockNumber?.toLocaleString("en-US") ?? "—"} · source{" "}
                 <a className="rc-link" href={explorerAddress(to.trim())} target="_blank" rel="noreferrer">
@@ -208,10 +229,16 @@ export function Simulator() {
             </>
           )}
         </div>
-        {res?.ok ? (
+        {res?.ok && gate && !gate.ok ? (
+          <div className="rc-card p-6" data-testid="sim-gate">
+            <span className="rc-label">Not offered for signing</span>
+            <p className="rc-small mt-3">{gate.reason}</p>
+          </div>
+        ) : null}
+        {res?.ok && gate?.ok ? (
           <div className="rc-card p-6">
             <span className="rc-label">Claim it yourself</span>
-            <p className="rc-small mt-3">Your wallet will show this exact call: {preset === "custom" ? "the calldata above" : p.label} to {shortAddress(to.trim())}. No approval, no fee to anyone but the network.</p>
+            <p className="rc-small mt-3">Your wallet will show this exact call: {gate.signature} to {shortAddress(ran!.to)}. No approval, no fee to anyone but the network.</p>
             {!address ? (
               <button type="button" className="rc-btn line mt-4" onClick={open}>
                 Connect the claimer&apos;s wallet
