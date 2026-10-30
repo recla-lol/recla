@@ -38,9 +38,8 @@ export const BRAND = {
   description: `${NAME} checks which claims a wallet really has on Robinhood Chain: supported sources only, read live from their contracts, every claim traced to its source and simulated before your own wallet signs it. Not a recovery tool and no promise of free assets.`,
   x: `https://x.com/${X_HANDLE}`,
   xHandle: `@${X_HANDLE}`,
-  // Public source repository. Set to "" to hide every GitHub link on the site.
-  // No public repository yet: every GitHub link to it stays hidden until this is set.
-  github: "",
+  // Public source repository (open source, MIT).
+  github: "https://github.com/recla-lol/recla",
   ca: CA,
 } as const;
 
