@@ -1,6 +1,7 @@
 import { BRAND, ETH_USD_FEED, USDG, WETH, isAddress } from "@/config/brand";
 import { CONTRACTS } from "@/config/contracts";
 import { HOODLOCK, PONS_ESCROW } from "@/config/sources";
+import { MULTICALL3, innerCalls } from "@/lib/multicall";
 
 /*
  * Rules for the read-only JSON-RPC relay, kept apart from the route so they
@@ -79,6 +80,34 @@ export function readTargets() {
   return new Set(list.map((a) => a.toLowerCase()));
 }
 
+/**
+ * Multicall3 (aggregate3 only) is relayed when every inner call either reads a fixed target, or is a bare ERC-20
+ * metadata view (symbol, name, decimals, totalSupply: 4 bytes, no arguments) on any address. Anything else through
+ * Multicall3 is refused: it would turn one relayed call into many probes. Inner calls cost 1 unit per 4, and each
+ * inner metadata call on an address outside the list counts as a probe.
+ */
+export const MAX_MULTICALL_INNER = 48;
+const META_SELECTORS = new Set(["0x95d89b41", "0x06fdde03", "0x313ce567", "0x18160ddd"]);
+const MULTICALL = MULTICALL3.toLowerCase();
+
+export function checkMulticall(data: unknown, targets: Set<string>): { units: number; probes: number } | { error: string } {
+  const calls = typeof data === "string" ? innerCalls(data) : null;
+  if (!calls) return { error: "Multicall3 is relayed only for aggregate3." };
+  if (calls.length === 0 || calls.length > MAX_MULTICALL_INNER) return { error: `Between 1 and ${MAX_MULTICALL_INNER} calls per multicall.` };
+  let probes = 0;
+  for (const c of calls) {
+    const t = c.target.toLowerCase();
+    if (t === MULTICALL) return { error: "Nested multicalls are not relayed." };
+    if (targets.has(t)) continue;
+    if (c.callData.length === 10 && META_SELECTORS.has(c.callData.toLowerCase())) {
+      probes += 1;
+      continue;
+    }
+    return { error: "Multicall3 is relayed only for the site's own contracts and token metadata." };
+  }
+  return { units: Math.ceil(calls.length / 4), probes };
+}
+
 /** Addresses a batch reads (eth_call targets and log filter addresses), lowercased. */
 export function namedAddresses(body: Call | Call[]): string[] {
   const calls = Array.isArray(body) ? body : [body];
@@ -87,7 +116,12 @@ export function namedAddresses(body: Call | Call[]): string[] {
     if (!c || !Array.isArray(c.params)) continue;
     const first = c.params[0] as { to?: unknown; address?: unknown } | undefined;
     if (!first || typeof first !== "object") continue;
-    if ((c.method === "eth_call" || c.method === "eth_estimateGas") && typeof first.to === "string") out.add(first.to.toLowerCase());
+    if ((c.method === "eth_call" || c.method === "eth_estimateGas") && typeof first.to === "string") {
+      out.add(first.to.toLowerCase());
+      // The inner targets of a multicall count as named too, so the priced pass charges before refusing them.
+      const data = (first as { data?: unknown }).data;
+      if (first.to.toLowerCase() === MULTICALL && typeof data === "string") for (const ic of innerCalls(data) ?? []) out.add(ic.target.toLowerCase());
+    }
     if (c.method === "eth_getLogs") {
       const a = first.address;
       for (const x of typeof a === "string" ? [a] : Array.isArray(a) ? a : []) if (typeof x === "string") out.add(x.toLowerCase());
@@ -152,7 +186,18 @@ export function checkBatch(calls: Call[], targets = readTargets()): { units: num
       if (params.length > 2) return { error: "State overrides are not relayed." };
       const tx = params[0] as { to?: unknown; gas?: unknown; data?: unknown } | undefined;
       if (!tx || typeof tx !== "object") return { error: "eth_call needs a call object." };
-      if (typeof tx.to !== "string" || !targets.has(tx.to.toLowerCase())) {
+      if (typeof tx.to === "string" && tx.to.toLowerCase() === MULTICALL) {
+        const shapedM = shapeTx(tx as Record<string, unknown>);
+        if (shapedM) return { error: shapedM };
+        const m = checkMulticall(tx.data, targets);
+        if ("error" in m) return { error: m.error };
+        const gas = typeof tx.gas === "string" && /^0x[0-9a-fA-F]{1,16}$/.test(tx.gas) ? Number(BigInt(tx.gas)) : Infinity;
+        if (gas > PROBE_GAS) return { error: "Multicalls need an explicit gas limit of at most 1,500,000." };
+        if ((tx as { value?: unknown }).value !== undefined) return { error: "Multicalls are relayed without value." };
+        units += m.units;
+        probes += m.probes;
+        units += m.probes * PROBE_COST;
+      } else if (typeof tx.to !== "string" || !targets.has(tx.to.toLowerCase())) {
         const why = probe(tx);
         if (why) return { error: why };
       }
@@ -170,6 +215,7 @@ export function checkBatch(calls: Call[], targets = readTargets()): { units: num
       if (params.length > 2) return { error: "State overrides are not relayed." };
       const tx = params[0] as { to?: unknown; gas?: unknown; data?: unknown } | undefined;
       if (!tx || typeof tx !== "object") return { error: "eth_estimateGas needs a transaction." };
+      if (typeof tx.to === "string" && tx.to.toLowerCase() === MULTICALL) return { error: "Gas estimates through Multicall3 are not relayed." };
       if (typeof tx.to !== "string" || !targets.has(tx.to.toLowerCase())) {
         const why = probe(tx);
         if (why) return { error: why };
@@ -208,9 +254,11 @@ export async function runRelay(body: Call | Call[], deps: RelayDeps): Promise<{ 
   // Priced with every named address allowed first, so a refused target still costs budget.
   const priced = checkBatch(calls, new Set([...targets, ...namedAddresses(body)]));
   if ("error" in priced) return { status: 400, body: { error: priced.error } };
-  const refused = await deps.charge(priced.units);
-  if (refused) return { status: 429, body: { error: refused } };
   const checked = checkBatch(calls, targets);
+  // The lenient pass sees no probes, so an allowed batch is charged its strict price: the caller pays for every
+  // probe before the site-wide probe budget is spent.
+  const refused = await deps.charge("error" in checked ? priced.units : Math.max(priced.units, checked.units));
+  if (refused) return { status: 429, body: { error: refused } };
   if ("error" in checked) return { status: 400, body: { error: checked.error } };
   if (checked.probes > 0) {
     const busy = await deps.chargeProbe(checked.probes * PROBE_COST);

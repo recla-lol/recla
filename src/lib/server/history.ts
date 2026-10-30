@@ -42,7 +42,7 @@ async function slot<T>(job: () => Promise<T>): Promise<T> {
     waiting.shift()?.();
   }
 }
-const getLogs: GetLogs = async (f) => {
+export const getLogs: GetLogs = async (f) => {
   for (let attempt = 0; ; attempt++) {
     try {
       return await slot(() => rawGetLogs(f));

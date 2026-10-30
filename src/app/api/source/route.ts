@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
 import { allowPublic, tooMany } from "@/lib/guard";
+import { createCache } from "@/lib/server/cache";
 import { getStore } from "@/lib/server/store";
 import { rpc } from "@/lib/feeds/rpc";
 import { CHAIN } from "@/config/brand";
 
 export const dynamic = "force-dynamic";
+/** eth_getCode plus one Sourcify lookup (6 s timeout). */
+export const maxDuration = 20;
 
 /*
  * Claim Verification facts for one contract: GET /api/source?address=0x…
@@ -12,12 +15,12 @@ export const dynamic = "force-dynamic";
  * - verified: whether Sourcify (keyless, chain 4663) holds a verified source for it, with the contract name. The
  *   Robinhood Chain explorer sits behind a bot wall from servers, so "not on Sourcify" is shown as "unknown", never as
  *   "unverified".
- * Cached 30 minutes per address.
+ * Cached 30 minutes per address, in memory and in the shared store when one is configured.
  */
 
 type Facts = { address: string; hasCode: boolean | null; codeSize: number | null; verified: "full" | "partial" | "unknown"; contractName: string | null; at: number };
-const cache = new Map<string, { at: number; value: Facts }>();
-const TTL = 30 * 60_000;
+const cache = createCache<Facts>("source", getStore, 5_000);
+const TTL = 30 * 60;
 
 async function sourcify(address: string): Promise<{ verified: Facts["verified"]; name: string | null }> {
   const ctrl = new AbortController();
@@ -40,8 +43,8 @@ export async function GET(request: Request) {
   const address = new URL(request.url).searchParams.get("address");
   if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) return NextResponse.json({ error: "Give a 0x address." }, { status: 400 });
   const key = address.toLowerCase();
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < TTL) return NextResponse.json(hit.value);
+  const hit = await cache.get(key);
+  if (hit) return NextResponse.json(hit.value);
   if (!(await allowPublic(getStore(), request, "source", 20, 300))) return tooMany();
   const [code, sf] = await Promise.all([rpc<string>("eth_getCode", [address, "latest"]).catch(() => null), sourcify(address)]);
   const value: Facts = {
@@ -52,7 +55,7 @@ export async function GET(request: Request) {
     contractName: sf.name,
     at: Date.now(),
   };
-  if (cache.size > 5_000) cache.delete(cache.keys().next().value as string);
-  cache.set(key, { at: Date.now(), value });
+  // A failed code read is not kept long: it says nothing about the contract.
+  await cache.set(key, value, value.hasCode === null ? 60 : TTL);
   return NextResponse.json(value);
 }

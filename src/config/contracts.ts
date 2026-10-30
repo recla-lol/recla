@@ -3,16 +3,16 @@ import { isAddress } from "@/config/brand";
 /*
  * Recla contract address on Robinhood Chain.
  *   registry  ReclaSourceRegistry, no constructor arguments, no owner, does not need the $RECLA token.
- *             Not deployed yet: the owner deploys it from the local-only /deploy page.
+ *             Deployed 30 Oct 2026 (block 101518913), verified on Blockscout.
  * Empty => registering, attesting and flagging run in practice mode (signed with your wallet, kept in this browser,
  * nothing sent). Filled => the same buttons send real transactions from the visitor's wallet and every list reads
  * the chain. Check a deployment any time:
  *   npm run verify-deployment -- --registry <address> --registry-tx <tx>
  */
 const DEPLOYED = {
-  registry: "",
+  registry: "0x9a5be91f9a1415d9c2e3cacdd26c7bd7adb1b2e7",
   /** Block of the ReclaSourceRegistry deployment (history reads start here). */
-  registryBlock: 0,
+  registryBlock: 101518913,
 };
 
 /**

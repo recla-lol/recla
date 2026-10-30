@@ -45,13 +45,26 @@ export function ClaimCheck() {
       .then(async (rows) => {
         set("pons", { state: "done", rows });
         // Pair-token credits are found from this address's history; read those balances too.
-        const h = await fetch(`/api/history?address=${acct}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+        const h = await fetch(`/api/history?address=${acct}`)
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null);
         const extra: string[] = Array.isArray(h?.creditedTokens) ? h.creditedTokens : [];
         if (extra.length) set("pons", { state: "done", rows: await readPonsEscrow(acct, extra) });
       })
       .catch(() => set("pons", { state: "error", note: "The escrow could not be read just now." }));
     readLocks(acct)
-      .then((rows) => set("lock", { state: "done", rows, note: rows.length === 0 ? "No HoodLock locks are owned by this address." : undefined }))
+      .then((rows) => {
+        const open = rows.filter((r) => r.status === "claimable").length;
+        const held = rows.filter((r) => r.status === "locked").length;
+        set("lock", {
+          state: "done",
+          rows,
+          note:
+            rows.length === 0
+              ? "No HoodLock locks are owned by this address."
+              : `${rows.length} lock${rows.length === 1 ? "" : "s"} read: ${open} withdrawable, ${held} still locked, ${rows.length - open - held} withdrawn or not readable. Withdrawable locks come first.`,
+        });
+      })
       .catch(() => set("lock", { state: "error", note: "The locker could not be read just now." }));
     if (registryLive()) {
       latestEntries(60)
@@ -119,7 +132,7 @@ export function ClaimCheck() {
         <div className="mt-12" data-testid="check-result">
           <div className="flex flex-wrap items-baseline justify-between gap-3">
             <p className="rc-label m-0">
-              Result for <span className="font-mono text-ink normal-case">{account}</span>
+              Result for <span className="font-mono text-ink normal-case break-all">{account}</span>
             </p>
             <p className="rc-mono m-0 text-lime" data-testid="claimable-count">
               {busy ? "reading…" : `${claimable} claimable now`}
@@ -132,12 +145,13 @@ export function ClaimCheck() {
               </p>
               {s.note ? <p className="rc-small mt-2 text-muted">{s.note}</p> : null}
               <div className="mt-3">
-                <ClaimRows rows={s.rows} account={account} />
+                <ClaimRows key={`${account}-${s.key}`} rows={s.rows} account={account} pageSize={s.key === "lock" ? 10 : undefined} />
               </div>
             </div>
           ))}
           <p className="rc-small mt-10 max-w-[760px] text-muted">
-            An empty result means none of the sources above owes this address anything right now. It says nothing about contracts {BRAND.name} does not read. Read on {CHAIN.name} at {new Date().toISOString().slice(11, 16)} UTC.
+            An empty result means none of the sources above owes this address anything right now. It says nothing about contracts {BRAND.name} does not read. Read on {CHAIN.name} at{" "}
+            {new Date().toISOString().slice(11, 16)} UTC.
           </p>
         </div>
       ) : null}

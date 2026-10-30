@@ -1,6 +1,9 @@
 import { parseAbi, type Abi } from "viem";
 
 /*
+ * Self-contained module: depends only on viem, with no app, config or React imports, so it can be copied into
+ * another project as is.
+ *
  * ABIs the site needs. REGISTRY_ABI mirrors contracts/src/ReclaSourceRegistry.sol (src/lib/abi.test.ts checks it
  * against the compiled artifact so the two cannot drift apart). ESCROW_ABI and LOCKER_ABI are the parts of the
  * verified Pons fee escrow and HoodLock locker sources that Recla reads (Sourcify, chain 4663).
@@ -90,6 +93,15 @@ export const LOCKER_ABI = parseAbi([
   "function withdraw(uint256 id)",
   "event Locked(uint256 indexed id, address indexed owner, address indexed token, uint256 amount, uint256 unlockTime)",
   "event Withdrawn(uint256 indexed id, address indexed owner, uint256 amount)",
+]);
+
+/** Multicall3, deployed at the same address on most EVM chains (Robinhood Chain included). */
+export const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
+
+export const MULTICALL3_ABI = parseAbi([
+  "struct Call3 { address target; bool allowFailure; bytes callData; }",
+  "struct Result { bool success; bytes returnData; }",
+  "function aggregate3(Call3[] calls) payable returns (Result[] returnData)",
 ]);
 
 /** The common Merkle distributor shape (index, account, amount, proof). */

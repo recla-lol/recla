@@ -1,7 +1,10 @@
 import { decodeEventLog, toEventSelector, type Abi, type Hex } from "viem";
-import { ESCROW_ABI, LOCKER_ABI, MERKLE_ABI, REGISTRY_ABI, VESTING_ABI } from "@/lib/abi";
+import { ESCROW_ABI, LOCKER_ABI, MERKLE_ABI, REGISTRY_ABI, VESTING_ABI } from "./abi";
 
 /*
+ * Self-contained module: depends only on viem and ./abi (no app, config or React imports), so it can be copied into
+ * another project. The log reader (GetLogs) is supplied by the caller.
+ *
  * Claim History: the exact log filters the server issues for a wallet, and how their answers are read. Filters are
  * built here from fixed event selectors and the wallet's padded address (never from caller input), as the relay
  * rules of common-2710 J require. The official Robinhood Chain RPC answers one query over at most 10,000,000 blocks
@@ -69,39 +72,39 @@ export function windows(start: number, latest: number, span = WINDOW, max = MAX_
 const tooMany = (e: unknown) => e instanceof Error && /exceed|limit|too many|more than/i.test(e.message);
 
 /** Logs of one window; a window over the node's match limit is split in half, down to MAX_SPLIT_DEPTH. */
-export async function logsInWindow(get: GetLogs, f: LogFilter, from: number, to: number, depth = 0): Promise<{ logs: RawLog[]; partial: boolean }> {
+export async function logsInWindow(get: GetLogs, f: LogFilter, from: number, to: number, depth = 0, maxEvents = MAX_EVENTS): Promise<{ logs: RawLog[]; partial: boolean }> {
   try {
     return { logs: await get({ ...f, fromBlock: from, toBlock: to }), partial: false };
   } catch (e) {
     if (!tooMany(e) || depth >= MAX_SPLIT_DEPTH || to <= from) throw e;
     const mid = Math.floor((from + to) / 2);
     // Newest half first, so a cap on events keeps the most recent ones.
-    const hi = await logsInWindow(get, f, mid + 1, to, depth + 1);
-    if (hi.logs.length >= MAX_EVENTS) return { logs: hi.logs, partial: true };
-    const lo = await logsInWindow(get, f, from, mid, depth + 1);
+    const hi = await logsInWindow(get, f, mid + 1, to, depth + 1, maxEvents);
+    if (hi.logs.length >= maxEvents) return { logs: hi.logs, partial: true };
+    const lo = await logsInWindow(get, f, from, mid, depth + 1, maxEvents);
     return { logs: [...hi.logs, ...lo.logs], partial: hi.partial || lo.partial };
   }
 }
 
-/** Walks windows newest first until MAX_EVENTS logs are found or the start block is reached. */
-export async function walkLogs(get: GetLogs, f: LogFilter, start: number, latest: number, maxWindows = MAX_WINDOWS): Promise<{ logs: RawLog[]; scannedFrom: number; complete: boolean }> {
+/** Walks windows newest first until `maxEvents` logs are found or the start block is reached. */
+export async function walkLogs(get: GetLogs, f: LogFilter, start: number, latest: number, maxWindows = MAX_WINDOWS, maxEvents = MAX_EVENTS): Promise<{ logs: RawLog[]; scannedFrom: number; complete: boolean }> {
   if (!filterShapeOk(f)) throw new Error("Refused log filter shape.");
   const ws = windows(start, latest, WINDOW, maxWindows);
   const logs: RawLog[] = [];
   let scannedFrom = latest + 1;
   let complete = true;
   for (const [from, to] of ws) {
-    const r = await logsInWindow(get, f, from, to);
+    const r = await logsInWindow(get, f, from, to, 0, maxEvents);
     logs.push(...r.logs);
     scannedFrom = from;
     if (r.partial) complete = false;
-    if (logs.length >= MAX_EVENTS) {
+    if (logs.length >= maxEvents) {
       complete = false;
       break;
     }
   }
   if (scannedFrom > start) complete = false;
-  return { logs: logs.slice(0, MAX_EVENTS), scannedFrom, complete };
+  return { logs: logs.slice(0, maxEvents), scannedFrom, complete };
 }
 
 export type HistoryEvent = {

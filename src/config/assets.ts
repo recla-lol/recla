@@ -1,6 +1,7 @@
 /*
- * Every brand image path in one place. All of them are drawn by referensi/tools/make-brand.mjs (no owner artwork yet:
- * the owner asked for generated art first). Replace a file at the same path, or change a path here, without touching components.
+ * Every brand image path in one place. All of them come from the owner's artwork (30 Oct 2026: crystal R mark and
+ * banner) via 2026/oktober/30/assets/apply-owner-assets.mjs. Replace a file at the same path, or change a path here,
+ * without touching components.
  */
 export const ASSETS = {
   /** Square mark on its dark plate (header, footer, avatars). */

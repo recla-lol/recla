@@ -10,12 +10,14 @@ import { useWalletModal } from "@/components/wallet/WalletButton";
 import { useWallet } from "@/components/wallet/WalletProvider";
 import { ESCROW_ABI, LOCKER_ABI, REFUND_ABI, VESTING_ABI } from "@/lib/abi";
 import { ETH, formatUnits, tokenInfo, type TokenInfo } from "@/lib/claims";
-import { explain, waitForReceipt } from "@/lib/client";
+import { client, explain, waitForReceipt } from "@/lib/client";
 import { describeCall, isBuiltInSource, selectorVerdict, signGate } from "@/lib/gate";
 import { read } from "@/lib/client";
 import { REGISTRY_ABI } from "@/lib/abi";
 import { CONTRACTS } from "@/config/contracts";
-import { balanceNow, calldataProblem, returnedAmount, simulate, type SimResult } from "@/lib/simulate";
+import { calldataProblem, createSimulator, returnedAmount, type SimResult } from "@/lib/simulate";
+
+const { simulate, balanceNow } = createSimulator(client);
 
 const isAddr = (v: string) => /^0x[0-9a-fA-F]{40}$/.test(v);
 

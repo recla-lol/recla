@@ -32,7 +32,7 @@ export default function AboutPage() {
             "Vesting tracker for vesting wallets that expose owner() and releasable().",
             "Refund explorer for contracts that state a refund through a view.",
             "Claim simulator, claim history, source verification facts.",
-            "The source registry contract, written and tested; practice mode until it is deployed.",
+            "The source registry contract, deployed and verified on Robinhood Chain.",
           ],
         },
         { h: "Planned, not built", list: ["Monitoring and alerts when a new claim appears for a wallet.", "Premium analytics.", "A developer API.", `${BRAND.symbol} utility: analytics credits and access to the above.`], p: ["Planned means planned. These will be announced when they work, not before."] },

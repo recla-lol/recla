@@ -9,9 +9,9 @@ const CA: string = "TBA";
 /**
  * True once the domain points at this deployment. While false, the production *.vercel.app host is served
  * as is (kept out of search with noindex) instead of redirecting to a domain that does not serve the site.
- * 30 Oct 2026: recla.lol is registered but does not point at a deployment yet; flip this once it serves the site.
+ * 30 Oct 2026: recla.lol serves this deployment (www redirects to it).
  */
-export const DOMAIN_LIVE = false;
+export const DOMAIN_LIVE = true;
 
 export const isAddress = (v: string): v is `0x${string}` => /^0x[0-9a-fA-F]{40}$/.test(v);
 
@@ -20,8 +20,8 @@ const SLUG = "recla";
 /** Shown upper case everywhere; the owner wrote it as $recla. */
 const TICKER = "RECLA";
 const DOMAIN = "recla.lol";
-/** X account as given in the owner's order (x.com/recla). Generic-looking handle: confirm with the owner. */
-const X_HANDLE = "recla";
+/** X account confirmed by the owner on 30 Oct 2026. */
+const X_HANDLE = "recla_lol";
 
 export const BRAND = {
   name: NAME,

@@ -2,7 +2,7 @@ import { encodeFunctionData, getAddress, zeroAddress, type Abi, type Hex } from 
 import { USDG, isAddress } from "@/config/brand";
 import { HOODLOCK, PONS_ESCROW } from "@/config/sources";
 import { ERC20_ABI, ESCROW_ABI, LOCKER_ABI, MERKLE_ABI, REFUND_ABI, VESTING_ABI } from "@/lib/abi";
-import { rpcCall, readMany, type Read } from "@/lib/client";
+import { rpcCall, readMany, readMulticall, type Read } from "@/lib/client";
 import { claimRoot, type Claim } from "@/lib/merkle";
 
 /*
@@ -50,9 +50,46 @@ export async function tokenInfo(address: string): Promise<TokenInfo> {
     { to: address, abi: ERC20_ABI as Abi, fn: "symbol" },
     { to: address, abi: ERC20_ABI as Abi, fn: "decimals" },
   ]).catch(() => [null, null]);
-  const t: TokenInfo = { address: getAddress(address), symbol: typeof sym === "string" && sym.length <= 16 ? sym : "?", decimals: typeof dec === "number" || typeof dec === "bigint" ? Number(dec) : 18 };
+  const t: TokenInfo = {
+    address: getAddress(address),
+    symbol: typeof sym === "string" && sym.length <= 16 ? sym : "?",
+    decimals: typeof dec === "number" || typeof dec === "bigint" ? Number(dec) : 18,
+  };
   tokenCache.set(key, t);
   return t;
+}
+
+/**
+ * Symbol and decimals of many ERC-20s in one Multicall3 read (the relay serves bare metadata views on any address
+ * through Multicall3). Cached like tokenInfo.
+ */
+export async function tokenInfos(addresses: string[], reader: (reads: Read[]) => Promise<unknown[]> = readMulticall): Promise<Map<string, TokenInfo>> {
+  const out = new Map<string, TokenInfo>();
+  const todo: string[] = [];
+  for (const a of new Set(addresses.map((x) => x.toLowerCase()))) {
+    if (!isAddress(a)) continue;
+    const hit = tokenCache.get(a);
+    if (hit) out.set(a, hit);
+    else if (a === USDG.address.toLowerCase()) out.set(a, await tokenInfo(a));
+    else todo.push(a);
+  }
+  if (todo.length) {
+    const res = await reader(
+      todo.flatMap((a) => [
+        { to: a, abi: ERC20_ABI as Abi, fn: "symbol" },
+        { to: a, abi: ERC20_ABI as Abi, fn: "decimals" },
+      ]),
+    ).catch(() => todo.flatMap(() => [null, null]));
+    todo.forEach((a, i) => {
+      const sym = res[i * 2];
+      const dec = res[i * 2 + 1];
+      const t: TokenInfo = { address: getAddress(a), symbol: typeof sym === "string" && sym.length <= 16 ? sym : "?", decimals: typeof dec === "number" || typeof dec === "bigint" ? Number(dec) : 18 };
+      // A failed read is not cached, so the next check tries again.
+      if (sym !== null || dec !== null) tokenCache.set(a, t);
+      out.set(a, t);
+    });
+  }
+  return out;
 }
 
 const enc = (abi: Abi, functionName: string, args: unknown[] = []) => encodeFunctionData({ abi, functionName, args } as never);
@@ -61,10 +98,7 @@ const enc = (abi: Abi, functionName: string, args: unknown[] = []) => encodeFunc
 export async function readPonsEscrow(account: `0x${string}`, extraTokens: string[] = []): Promise<ClaimRow[]> {
   const to = PONS_ESCROW.address as `0x${string}`;
   const tokens = [...new Set([USDG.address, ...extraTokens].map((t) => t.toLowerCase()))].filter((t) => isAddress(t)).slice(0, 12);
-  const reads: Read[] = [
-    { to, abi: ESCROW_ABI as Abi, fn: "balanceOf", args: [account] },
-    ...tokens.map((t) => ({ to, abi: ESCROW_ABI as Abi, fn: "balanceOfToken", args: [account, t] })),
-  ];
+  const reads: Read[] = [{ to, abi: ESCROW_ABI as Abi, fn: "balanceOf", args: [account] }, ...tokens.map((t) => ({ to, abi: ESCROW_ABI as Abi, fn: "balanceOfToken", args: [account, t] }))];
   const out = await readMany(reads);
   const rows: ClaimRow[] = [];
   const eth = out[0];
@@ -107,41 +141,80 @@ export async function readPonsEscrow(account: `0x${string}`, extraTokens: string
 
 type LockTuple = { owner: `0x${string}`; token: `0x${string}`; amount: bigint; unlockTime: bigint; withdrawn: boolean };
 
-/** HoodLock locks owned by the address. Withdrawable = unlock time passed and not withdrawn yet. */
-export async function readLocks(account: `0x${string}`, now = Math.floor(Date.now() / 1000)): Promise<ClaimRow[]> {
+/** Most lock ids read for one owner. HoodLock held about 735 locks in total on 30 Oct 2026. */
+export const MAX_OWNER_LOCKS = 2_000;
+
+const STATUS_ORDER: Record<ClaimStatus, number> = { claimable: 0, locked: 1, unreadable: 2, claimed: 3, empty: 4 };
+
+/** Withdrawable first, then still locked (soonest unlock first), then withdrawn; newest lock first within a group. */
+export function sortLockRows(rows: ClaimRow[]): ClaimRow[] {
+  const id = (r: ClaimRow) => BigInt(r.id.replace(/^lock-/, "") || "0");
+  return [...rows].sort((a, b) => {
+    const s = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
+    if (s) return s;
+    if (a.status === "locked" && a.unlockAt !== b.unlockAt) return (a.unlockAt ?? 0) - (b.unlockAt ?? 0);
+    const d = id(b) - id(a);
+    return d > 0n ? 1 : d < 0n ? -1 : 0;
+  });
+}
+
+export type LockReaders = { reader?: (reads: Read[]) => Promise<unknown[]>; tokens?: (addresses: string[]) => Promise<Map<string, TokenInfo>> };
+
+/**
+ * Every HoodLock lock owned by the address (no cap on the newest few): ids from locksByOwner, then getLock for all of
+ * them through Multicall3 in chunks of 40, and token metadata in one more multicall. Withdrawable = unlock time passed
+ * and not withdrawn yet. Rows are sorted with sortLockRows; the UI pages through them.
+ */
+export async function readLocks(account: `0x${string}`, now = Math.floor(Date.now() / 1000), readers: LockReaders = {}): Promise<ClaimRow[]> {
+  const reader = readers.reader ?? readMulticall;
   const to = HOODLOCK.address as `0x${string}`;
-  const ids = (await readMany([{ to, abi: LOCKER_ABI as Abi, fn: "locksByOwner", args: [account] }]))[0];
+  // A plain eth_call: an owner with many locks gets a long id list, which needs no Multicall3 wrapping.
+  const [ids] = await (readers.reader ?? readMany)([{ to, abi: LOCKER_ABI as Abi, fn: "locksByOwner", args: [account] }]);
   if (!Array.isArray(ids)) throw new Error("The locker did not answer locksByOwner just now.");
-  const list = (ids as bigint[]).slice(-40);
-  const locks = await readMany(list.map((id) => ({ to, abi: LOCKER_ABI as Abi, fn: "getLock", args: [id] })));
+  const list = (ids as bigint[]).slice(-MAX_OWNER_LOCKS);
+  const locks = await reader(list.map((id) => ({ to, abi: LOCKER_ABI as Abi, fn: "getLock", args: [id] })));
+  const tokenAddrs = locks.map((l) => (l && typeof l === "object" ? (l as LockTuple).token : null)).filter((t): t is `0x${string}` => typeof t === "string");
+  const infos = await (readers.tokens ?? ((a: string[]) => tokenInfos(a, reader)))(tokenAddrs);
   const rows: ClaimRow[] = [];
   for (let i = 0; i < list.length; i++) {
     const l = locks[i] as LockTuple | null;
-    if (!l) continue;
-    const token = await tokenInfo(l.token);
+    const lockId = list[i];
+    if (!l) {
+      rows.push({
+        id: `lock-${lockId}`,
+        sourceKey: HOODLOCK.key,
+        sourceName: HOODLOCK.name,
+        source: to,
+        title: `Lock #${lockId}`,
+        status: "unreadable",
+        amount: 0n,
+        token: { address: null, symbol: "?", decimals: 18 },
+        why: "getLock did not answer for this id just now. Check again in a moment.",
+        action: null,
+        link: { label: "HoodLock proof", href: HOODLOCK.proofUrl(lockId) },
+      });
+      continue;
+    }
+    const token = infos.get(l.token.toLowerCase()) ?? { address: getAddress(l.token), symbol: "?", decimals: 18 };
     const unlockAt = Number(l.unlockTime);
     const open = unlockAt <= now;
     const status: ClaimStatus = l.withdrawn ? "claimed" : open ? "claimable" : "locked";
     rows.push({
-      id: `lock-${list[i]}`,
+      id: `lock-${lockId}`,
       sourceKey: HOODLOCK.key,
       sourceName: HOODLOCK.name,
       source: to,
-      title: `Lock #${list[i]} · ${token.symbol}`,
+      title: `Lock #${lockId} · ${token.symbol}`,
       status,
       amount: l.amount,
       token,
       unlockAt,
-      why: l.withdrawn
-        ? "This lock was already withdrawn."
-        : open
-          ? "The unlock time has passed; the lock owner can withdraw it."
-          : "Still locked: nothing can be withdrawn before the unlock time.",
-      action: status === "claimable" ? { label: `withdraw(${list[i]})`, to, data: enc(LOCKER_ABI as Abi, "withdraw", [list[i]]) } : null,
-      link: { label: "HoodLock proof", href: HOODLOCK.proofUrl(list[i]) },
+      why: l.withdrawn ? "This lock was already withdrawn." : open ? "The unlock time has passed; the lock owner can withdraw it." : "Still locked: nothing can be withdrawn before the unlock time.",
+      action: status === "claimable" ? { label: `withdraw(${lockId})`, to, data: enc(LOCKER_ABI as Abi, "withdraw", [lockId]) } : null,
+      link: { label: "HoodLock proof", href: HOODLOCK.proofUrl(lockId) },
     });
   }
-  return rows;
+  return sortLockRows(rows);
 }
 
 export type MerkleCheck = {
@@ -290,7 +363,12 @@ export async function readEscrowGeneric(source: `0x${string}`, account: `0x${str
     status: amt === null ? "unreadable" : amt > 0n ? "claimable" : "empty",
     amount: amt ?? 0n,
     token: ETH,
-    why: amt === null ? "This contract does not answer balanceOf(address) the escrow way." : amt > 0n ? "balanceOf(address) is above zero on this escrow." : "balanceOf(address) is zero for this address.",
+    why:
+      amt === null
+        ? "This contract does not answer balanceOf(address) the escrow way."
+        : amt > 0n
+          ? "balanceOf(address) is above zero on this escrow."
+          : "balanceOf(address) is zero for this address.",
     action: amt && amt > 0n ? { label: "claim()", to: source, data: enc(ESCROW_ABI as Abi, "claim") } : null,
   };
 }

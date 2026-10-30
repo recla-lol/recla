@@ -83,3 +83,51 @@ test("a probe spends the site-wide probe budget and stops when it is empty", asy
   assert.equal(ok.status, 200);
   assert.equal(spent, 4);
 });
+
+test("Multicall3 is relayed only as aggregate3 over the site's own contracts and token metadata", async () => {
+  const { encodeAggregate3, MULTICALL3 } = await import("./multicall");
+  const { LOCKER_ABI, ERC20_ABI } = await import("./abi");
+  const { HOODLOCK } = await import("@/config/sources");
+
+  const STRANGER = "0x000000000000000000000000000000000000dead";
+  const mc = (data: string, gas = "0x16e360") => ({ method: "eth_call", params: [{ to: MULTICALL3, data, gas }, "latest"] });
+  const locks = Array.from({ length: 40 }, (_, i) => ({ to: HOODLOCK.address, abi: LOCKER_ABI, fn: "getLock", args: [BigInt(i)] }));
+  const ok = checkBatch([mc(encodeAggregate3(locks))]);
+  assert.ok("units" in ok && ok.probes === 0 && ok.units === 2 + 10, JSON.stringify(ok));
+  const meta = checkBatch([mc(encodeAggregate3([{ to: STRANGER, abi: ERC20_ABI, fn: "symbol" }, { to: STRANGER, abi: ERC20_ABI, fn: "decimals" }]))]);
+  assert.ok("units" in meta && meta.probes === 2, JSON.stringify(meta));
+  // balanceOf(x) on an outside address carries arguments: refused, as is any other call there.
+  assert.ok("error" in checkBatch([mc(encodeAggregate3([{ to: STRANGER, abi: ERC20_ABI, fn: "balanceOf", args: [STRANGER] }]))]));
+  assert.ok("error" in checkBatch([mc(encodeAggregate3([{ to: STRANGER, abi: LOCKER_ABI, fn: "nextLockId" }]))]));
+  // Only aggregate3, with an explicit gas of at most 1.5M, no nesting, no gas estimates.
+  assert.ok("error" in checkBatch([mc("0x252dba42")]));
+  assert.ok("error" in checkBatch([mc(encodeAggregate3(locks.slice(0, 2)), "0x4c4b40")]));
+  assert.ok("error" in checkBatch([{ method: "eth_call", params: [{ to: MULTICALL3, data: encodeAggregate3(locks.slice(0, 2)) }, "latest"] }]));
+  assert.ok("error" in checkBatch([mc(encodeAggregate3([{ to: MULTICALL3, abi: LOCKER_ABI, fn: "nextLockId" }]))]));
+  assert.ok("error" in checkBatch([{ method: "eth_estimateGas", params: [{ to: MULTICALL3, data: encodeAggregate3(locks.slice(0, 1)), gas: "0x16e360" }] }]));
+});
+
+test("the caller pays for every probe, top-level or inside a multicall, before the site-wide probe budget", async () => {
+  const { encodeAggregate3, MULTICALL3 } = await import("./multicall");
+  const { ERC20_ABI } = await import("./abi");
+  const STRANGER = "0x000000000000000000000000000000000000dead";
+  const meta = Array.from({ length: 48 }, () => ({ to: STRANGER, abi: ERC20_ABI, fn: "symbol" }));
+  const mc = { method: "eth_call", params: [{ to: MULTICALL3, data: encodeAggregate3(meta), gas: "0x16e360" }, "latest"] };
+  const strict = checkBatch([mc]);
+  assert.ok("units" in strict && strict.probes === 48, JSON.stringify(strict));
+  let charged = 0;
+  const out = await runRelay(mc, { charge: async (u) => { charged = u; return null; }, chargeProbe: async () => null, one: async () => ({ result: "0x" }), many: async () => [] });
+  assert.equal(out.status, 200);
+  assert.equal(charged, strict.units);
+  assert.ok(charged >= 48 * 4);
+  // A caller without budget is stopped before the site-wide probe bucket is touched.
+  let probeSpent = false;
+  const stopped = await runRelay(mc, { charge: async () => "slow down", chargeProbe: async () => { probeSpent = true; return null; }, one: async () => ({ result: "0x" }), many: async () => [] });
+  assert.equal(stopped.status, 429);
+  assert.equal(probeSpent, false);
+  // A top-level probe is charged its probe price to the caller as well.
+  const p = { method: "eth_call", params: [{ to: STRANGER, data: "0x18160ddd", gas: "0x100000" }, "latest"] };
+  const one = checkBatch([p]);
+  await runRelay(p, { charge: async (u) => { charged = u; return null; }, chargeProbe: async () => null, one: async () => ({ result: "0x" }), many: async () => [] });
+  assert.ok("units" in one && charged === one.units);
+});

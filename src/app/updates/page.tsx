@@ -18,7 +18,7 @@ export default function UpdatesPage() {
           list: [
             "Site published: claim check, Merkle eligibility, vesting tracker, refund explorer, simulator, claim history, source verification, safety quiz.",
             "Built-in sources: Pons creator fee escrow (0xd3AF…Ac9e) and HoodLock locks (0xD0f7…C32F), read paths confirmed against their verified code.",
-            "ReclaSourceRegistry written and tested; not deployed yet, so the registry page runs in practice mode.",
+            "ReclaSourceRegistry deployed (0x9a5b…b2e7) and verified on the explorer; registering, attesting and flagging now send real transactions.",
             `${BRAND.symbol}: not launched. No contract address is published; any address you see elsewhere is not ours.`,
           ],
         },
