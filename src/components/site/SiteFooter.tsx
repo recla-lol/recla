@@ -1,8 +1,8 @@
 import Link from "next/link";
-import { BRAND, CHAIN, TOKEN, buyUrl } from "@/config/brand";
+import { BRAND, CHAIN, TOKEN, buyUrl, hasGithub } from "@/config/brand";
 import { ASSETS } from "@/config/assets";
 import { CaButton } from "@/components/site/CaCopy";
-import { ArrowUpRight, XLogo } from "@/components/site/Icons";
+import { ArrowUpRight, GitHubLogo, XLogo } from "@/components/site/Icons";
 import { FOOTER_COLS, LEGAL } from "@/components/site/nav";
 
 export const LAST_UPDATE = "30 October 2026";
@@ -22,6 +22,11 @@ export function SiteFooter() {
           <a className="rc-btn ghost mono" href={BRAND.x} target="_blank" rel="noreferrer">
             Follow {BRAND.xHandle} <ArrowUpRight size={13} />
           </a>
+          {hasGithub ? (
+            <a className="rc-btn ghost mono" href={BRAND.github} target="_blank" rel="noreferrer">
+              <GitHubLogo size={14} /> Source code
+            </a>
+          ) : null}
         </div>
       </div>
       <div className="rc-wrap">

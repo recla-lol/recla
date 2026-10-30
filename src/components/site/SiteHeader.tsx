@@ -3,10 +3,10 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { BRAND, buyUrl, TOKEN } from "@/config/brand";
+import { BRAND, buyUrl, hasGithub, TOKEN } from "@/config/brand";
 import { Brand } from "@/components/site/Brand";
 import { CaButton } from "@/components/site/CaCopy";
-import { CloseIcon, MenuIcon, XLogo } from "@/components/site/Icons";
+import { CloseIcon, GitHubLogo, MenuIcon, XLogo } from "@/components/site/Icons";
 import { TOP_NAV } from "@/components/site/nav";
 import { NavWallet } from "@/components/wallet/WalletButton";
 
@@ -47,6 +47,11 @@ export function SiteHeader() {
             <a className="rc-btn ghost mono hide-xs" href={BRAND.x} target="_blank" rel="noreferrer" aria-label={`${BRAND.name} on X`}>
               <XLogo size={14} /> <span className="hide-sm">{BRAND.xHandle}</span>
             </a>
+            {hasGithub ? (
+              <a className="rc-btn ghost mono hide-xs" href={BRAND.github} target="_blank" rel="noreferrer" aria-label={`${BRAND.name} source code on GitHub`} title="Source code on GitHub">
+                <GitHubLogo size={15} />
+              </a>
+            ) : null}
             <button type="button" className="rc-burger" aria-label={open ? "Close menu" : "Open menu"} aria-expanded={open} onClick={() => setOpenOn(open ? null : path)} data-testid="burger">
               {open ? <CloseIcon size={20} /> : <MenuIcon size={20} />}
             </button>
@@ -66,6 +71,11 @@ export function SiteHeader() {
           <a href={BRAND.x} target="_blank" rel="noreferrer" className="item">
             X {BRAND.xHandle}
           </a>
+          {hasGithub ? (
+            <a href={BRAND.github} target="_blank" rel="noreferrer" className="item">
+              Source on GitHub
+            </a>
+          ) : null}
           <div className="ctas">
             <BuyButton />
             <CaButton className="rc-btn ghost" />
